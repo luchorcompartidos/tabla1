@@ -12,7 +12,7 @@
     padding: 30px 16px;
   }
   #sheet-sync-container {
-    max-width: 700px;
+    max-width: 900px;
     margin: 0 auto;
     background: #fff;
     border: 1px solid #e5e5e5;
@@ -53,38 +53,47 @@
     margin-bottom: 8px;
     min-height: 16px;
   }
-  #sheet-sync-list .record {
-    margin-bottom: 16px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid #ddd;
+
+  /* --- Vista de tabla --- */
+  #sheet-sync-table-wrapper {
+    overflow-x: auto;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
   }
-  #sheet-sync-list .record:last-child {
-    border-bottom: none;
+  #sheet-sync-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
   }
-  #sheet-sync-list .record .record-title {
-    color: #1a2b1a;
+  #sheet-sync-table thead th {
+    background: #1a2b1a;
+    color: #fff;
     font-weight: 600;
-    font-size: 15px;
-    display: block;
+    text-align: left;
+    padding: 10px 12px;
+    white-space: nowrap;
+    position: sticky;
+    top: 0;
   }
-  #sheet-sync-list .record .record-title a {
+  #sheet-sync-table tbody td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #eee;
+    vertical-align: top;
+  }
+  #sheet-sync-table tbody tr:nth-child(even) {
+    background: #fafafa;
+  }
+  #sheet-sync-table tbody tr:hover {
+    background: #f0f4f0;
+  }
+  #sheet-sync-table td a,
+  #sheet-sync-table th a {
     color: #1a73e8;
     text-decoration: none;
   }
-  #sheet-sync-list .record .record-title a:hover { text-decoration: underline; }
-  #sheet-sync-list .record .extra-field {
-    display: block;
-    margin-top: 4px;
-    font-size: 13px;
-    color: #444;
+  #sheet-sync-table td a:hover {
+    text-decoration: underline;
   }
-  #sheet-sync-list .record .extra-field a {
-    font-weight: normal;
-    font-size: 13px;
-    color: #1a73e8;
-    text-decoration: none;
-  }
-  #sheet-sync-list .record .extra-field a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -97,17 +106,24 @@
   </div>
   <div id="sheet-sync-count"></div>
   <div id="sheet-sync-status"></div>
-  <div id="sheet-sync-list"></div>
+  <div id="sheet-sync-table-wrapper">
+    <table id="sheet-sync-table">
+      <thead>
+        <tr id="sheet-sync-table-head"></tr>
+      </thead>
+      <tbody id="sheet-sync-table-body"></tbody>
+    </table>
+  </div>
 </div>
 
 <script>
 (function () {
   // --- Configuración ---
-  // A diferencia de la versión anterior, esta app NO busca columnas por nombre.
-  // Toma todas las columnas que existan en la planilla, en el orden en que
-  // aparezcan, y decide cómo mostrar cada valor según su propio contenido
-  // (por ejemplo, si "parece" una URL o no). Si agregás, quitás o reordenás
-  // columnas en la planilla, la página se adapta sola sin tocar el código.
+  // Esta app NO busca columnas por nombre. Toma todas las columnas que
+  // existan en la planilla, en el orden en que aparezcan, y decide cómo
+  // mostrar cada valor según su propio contenido (por ejemplo, si "parece"
+  // una URL o no). Si agregás, quitás o reordenás columnas en la planilla,
+  // la página se adapta sola sin tocar el código.
   const SHEET_ID = "1dkGOT3XaPuHa8Kpj_UpD_sKkSGCs_1P5HyL_Z2IIcmQ";
   const GID = "0";
   const REFRESH_MS = 86400000; // vuelve a sincronizar cada 24 horas
@@ -121,8 +137,9 @@
 
   const statusEl = document.getElementById("sheet-sync-status");
   const timeEl = document.getElementById("sheet-sync-time");
-  const listEl = document.getElementById("sheet-sync-list");
   const countEl = document.getElementById("sheet-sync-count");
+  const theadRowEl = document.getElementById("sheet-sync-table-head");
+  const tbodyEl = document.getElementById("sheet-sync-table-body");
 
   function escapeHtml(str) {
     return String(str)
@@ -166,6 +183,7 @@
   }
 
   function formatValue(value) {
+    if (value === "") return "";
     if (isUrl(value)) {
       const safeUrl = escapeHtml(value);
       const label = escapeHtml(linkLabelFromUrl(value));
@@ -188,55 +206,44 @@
       // Si una columna no tiene encabezado, se le pone un nombre genérico.
       const headers = cols.map((c, i) => (c.label && c.label.trim()) || `Columna ${i + 1}`);
 
-      // Arma primero la lista de registros (filas con al menos un dato) para
-      // poder contarlos antes de convertirlos en HTML.
-      const recordFields = rows
+      // Pinta la fila de encabezado de la tabla (destacada por CSS).
+      theadRowEl.innerHTML = headers
+        .map(h => `<th>${escapeHtml(h)}</th>`)
+        .join("");
+
+      // Arma la lista de registros (filas con al menos un dato en la
+      // primera columna) manteniendo el orden y las columnas originales
+      // de la planilla, celda por celda.
+      const dataRows = rows
         .map(r => {
           // La primera columna decide si el registro existe: si no tiene
           // NINGÚN carácter se descarta. Si tiene al menos un carácter
-          // (aunque sea un espacio en blanco " "), el registro se toma y
-          // se muestra igual que cualquier otro (por eso acá NO se usa
-          // cellValue, que recorta espacios, sino cellValueRaw).
+          // (aunque sea un espacio en blanco " "), el registro se toma.
           const firstColRaw = cellValueRaw(r, 0);
           if (firstColRaw.length === 0) return null;
 
-          // El resto de las columnas sigue funcionando como antes:
-          // se descartan las que no tengan dato.
-          const restFields = headers
-            .slice(1)
-            .map((header, i) => ({ header, value: cellValue(r, i + 1) }))
-            .filter(f => f.value !== "");
+          // El resto de las columnas se toma tal cual viene (recortando
+          // espacios), respetando la posición original de cada una.
+          const restValues = headers.slice(1).map((_, i) => cellValue(r, i + 1));
 
-          return [{ header: headers[0], value: firstColRaw }, ...restFields];
+          return [firstColRaw, ...restValues];
         })
-        .filter(fields => fields !== null); // descarta solo las filas sin primera columna
+        .filter(values => values !== null); // descarta solo las filas sin primera columna
 
-      countEl.textContent = `Actualizados: ${recordFields.length} Registros`;
+      countEl.textContent = `Actualizados: ${dataRows.length} Registros`;
 
-      listEl.innerHTML = recordFields
-        .map(fields => {
-          // La primera columna con dato de la fila se usa como título del
-          // registro (posición, no nombre). El resto se lista debajo.
-          const [titleField, ...restFields] = fields;
-
-          const titleHtml = isUrl(titleField.value)
-            ? `<a href="${escapeHtml(titleField.value)}" target="_blank" rel="noopener">${escapeHtml(titleField.value)}</a>`
-            : escapeHtml(titleField.value);
-
-          const restHtml = restFields
-            .map(f => `<span class="extra-field"><strong>${escapeHtml(f.header)}:</strong> ${formatValue(f.value)}</span>`)
+      tbodyEl.innerHTML = dataRows
+        .map(values => {
+          const cellsHtml = values
+            .map(v => `<td>${formatValue(v)}</td>`)
             .join("");
-
-          return `
-            <div class="record">
-              <span class="record-title">${titleHtml}</span>
-              ${restHtml}
-            </div>`;
+          return `<tr>${cellsHtml}</tr>`;
         })
         .join("");
 
-      if (!listEl.innerHTML) {
-        listEl.innerHTML = '<p style="color:#999;font-size:14px;">No se encontraron registros.</p>';
+      if (!tbodyEl.innerHTML) {
+        const colspan = headers.length || 1;
+        tbodyEl.innerHTML = `<tr><td colspan="${colspan}" style="color:#999;">No se encontraron registros.</td></tr>`;
       }
 
       statusEl.textContent = "";
