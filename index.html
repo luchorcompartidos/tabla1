@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Tablas "Dinámicas"</title>
+<title>LRWebCatalog Dinámico</title>
 <style>
   body {
     font-family: -apple-system, Segoe UI, Roboto, sans-serif;
@@ -70,13 +70,15 @@
     text-decoration: underline;
   }
   #sheet-sync-table-wrapper {
-    overflow-x: auto;
+    overflow: auto;
     border: 1px solid #e0e0e0;
     border-radius: 8px;
+    max-height: 70vh;
   }
   #sheet-sync-table {
     width: 100%;
-    border-collapse: collapse;
+    border-collapse: separate;
+    border-spacing: 0;
     font-size: 13px;
   }
   #sheet-sync-table thead th {
@@ -88,14 +90,16 @@
     white-space: nowrap;
     position: sticky;
     top: 0;
+    z-index: 3;
     cursor: pointer;
     user-select: none;
+    box-shadow: 0 2px 4px -2px rgba(0,0,0,0.35);
   }
   #sheet-sync-table thead th:hover {
     background: #2c452c;
   }
   #sheet-sync-table thead th::after {
-    content: " ⏷";
+    content: " \23f7";
     font-size: 10px;
     opacity: 0.6;
   }
@@ -104,10 +108,13 @@
     border-bottom: 1px solid #eee;
     vertical-align: top;
   }
-  #sheet-sync-table tbody tr:nth-child(even) {
+  #sheet-sync-table tbody tr:nth-child(even) td {
     background: #fafafa;
   }
-  #sheet-sync-table tbody tr:hover {
+  #sheet-sync-table tbody tr:nth-child(odd) td {
+    background: #fff;
+  }
+  #sheet-sync-table tbody tr:hover td {
     background: #f0f4f0;
   }
   #sheet-sync-table td a,
@@ -118,12 +125,39 @@
   #sheet-sync-table td a:hover {
     text-decoration: underline;
   }
+
+  /* --- Inmovilizar (freeze) 1ra columna visible + encabezado --- */
+  /* La celda de encabezado de la 1ra columna necesita quedar inmóvil en
+     ambos ejes (arriba Y a la izquierda) mientras se hace scroll, por eso
+     combina "top" (heredado de thead th) y "left" (de esta regla), con el
+     z-index más alto de toda la tabla para tapar todo lo demás. */
+  .sticky-col {
+    position: sticky;
+    left: 0;
+    box-shadow: 2px 0 4px -2px rgba(0,0,0,0.25);
+  }
+  thead th.sticky-col {
+    z-index: 5;
+    background: #1a2b1a;
+  }
+  tbody td.sticky-col {
+    z-index: 1;
+  }
+  tbody tr:nth-child(even) td.sticky-col {
+    background: #fafafa;
+  }
+  tbody tr:nth-child(odd) td.sticky-col {
+    background: #fff;
+  }
+  tbody tr:hover td.sticky-col {
+    background: #f0f4f0;
+  }
 </style>
 </head>
 <body>
 
 <div id="sheet-sync-container">
-  <h1>Tabla: </h1>
+  <h1>LR WEB CATALOG Genérico</h1>
   <div class="sheet-sync-header">
     <span>Última sincronización: <span id="sheet-sync-time">—</span></span>
     <button id="sheet-sync-refresh">Actualizar ahora</button>
@@ -166,11 +200,14 @@
   const theadRowEl = document.getElementById("sheet-sync-table-head");
   const tbodyEl = document.getElementById("sheet-sync-table-body");
   const legendEl = document.getElementById("sheet-sync-hidden-legend");
+  const wrapperEl = document.getElementById("sheet-sync-table-wrapper");
 
-  // Estado en memoria (se conserva entre sincronizaciones automáticas,
-  // pero se recalcula si desaparece del todo la planilla). Se guarda por
-  // NOMBRE de columna, no por posición, para que no se desarme si la
-  // planilla cambia el orden de las columnas.
+  // Estado en memoria. currentHeaders / currentDataRows ya vienen filtrados
+  // (sin las columnas cuyo encabezado está totalmente vacío) y recortados
+  // (sin columnas finales sin ningún dato). hiddenColumns es el set de
+  // columnas que el usuario decidió ocultar a mano haciendo click, se
+  // guarda por NOMBRE de columna (no por posición) para no desarmarse si
+  // la planilla cambia el orden de las columnas.
   let currentHeaders = [];
   let currentDataRows = [];
   const hiddenColumns = new Set();
@@ -183,21 +220,19 @@
       .replace(/"/g, "&quot;");
   }
 
-  // Devuelve el valor de una celda como texto, o "" si está vacía / no existe
-  function cellValue(row, colIndex) {
-    const cell = row.c[colIndex];
-    if (!cell || cell.v === null || cell.v === undefined) return "";
-    const str = String(cell.v).trim();
-    return str;
-  }
-
-  // Igual que cellValue, pero SIN recortar espacios. Se usa solo para la
-  // primera columna, porque ahí un espacio en blanco (" ") debe contar
-  // como "tiene un carácter" y no como celda vacía.
+  // Valor de una celda SIN recortar espacios. Se usa para decidir
+  // existencia (fila o columna) porque ahí un espacio en blanco (" ")
+  // cuenta como "tiene un carácter" y no debe tratarse como vacío.
   function cellValueRaw(row, colIndex) {
     const cell = row.c[colIndex];
     if (!cell || cell.v === null || cell.v === undefined) return "";
     return String(cell.v);
+  }
+
+  // Valor de una celda recortando espacios. Se usa para el resto de las
+  // columnas, para mostrar los datos ya "prolijos".
+  function cellValue(row, colIndex) {
+    return cellValueRaw(row, colIndex).trim();
   }
 
   function isUrl(value) {
@@ -235,9 +270,14 @@
       .map((_, i) => i)
       .filter(i => !hiddenColumns.has(currentHeaders[i]));
 
-    // Encabezado: cada <th> es clickeable y oculta su columna.
+    // Encabezado: cada <th> es clickeable y oculta su columna. La primera
+    // columna que efectivamente se muestra queda marcada como "sticky-col"
+    // para inmovilizarla junto con la fila de encabezado.
     theadRowEl.innerHTML = visibleIndexes
-      .map(i => `<th data-col-index="${i}" title="Click para ocultar esta columna">${escapeHtml(currentHeaders[i])}</th>`)
+      .map((i, viIdx) => {
+        const stickyClass = viIdx === 0 ? ' class="sticky-col"' : "";
+        return `<th data-col-index="${i}"${stickyClass} title="Click para ocultar esta columna">${escapeHtml(currentHeaders[i])}</th>`;
+      })
       .join("");
 
     theadRowEl.querySelectorAll("th").forEach(th => {
@@ -266,11 +306,15 @@
     }
 
     // Cuerpo de la tabla: solo se listan las columnas visibles, en el
-    // mismo orden que el encabezado.
+    // mismo orden que el encabezado. La primera columna visible también
+    // se marca "sticky-col" en cada fila.
     tbodyEl.innerHTML = currentDataRows
       .map(values => {
         const cellsHtml = visibleIndexes
-          .map(i => `<td>${formatValue(values[i])}</td>`)
+          .map((i, viIdx) => {
+            const stickyClass = viIdx === 0 ? ' class="sticky-col"' : "";
+            return `<td${stickyClass}>${formatValue(values[i])}</td>`;
+          })
           .join("");
         return `<tr>${cellsHtml}</tr>`;
       })
@@ -280,7 +324,68 @@
       const colspan = visibleIndexes.length || 1;
       tbodyEl.innerHTML = `<tr><td colspan="${colspan}" style="color:#999;">No se encontraron registros.</td></tr>`;
     }
+
+    // Recalcula, después de pintar, si la 1ra columna inmovilizada necesita
+    // un límite de ancho para dejar lugar a la 2da columna completa y un
+    // fragmento de la 3ra.
+    requestAnimationFrame(adjustStickyColumnWidth);
   }
+
+  // Si el contenido de la 1ra columna visible (la que queda inmovilizada)
+  // es tan ancho que ocupa todo el ancho visible de la tabla (o más), se le
+  // pone un tope de ancho -con texto truncado con "..."- para que siempre
+  // quede espacio en pantalla para ver la 2da columna completa y al menos
+  // un fragmento de la 3ra. Si el contenido ya entra sin problema, no se
+  // toca nada.
+  function adjustStickyColumnWidth() {
+    const stickyCells = document.querySelectorAll(".sticky-col");
+    // Saca cualquier límite previo para medir el ancho "natural" real.
+    stickyCells.forEach(el => {
+      el.style.maxWidth = "";
+      el.style.whiteSpace = "";
+      el.style.overflow = "";
+      el.style.textOverflow = "";
+      el.removeAttribute("title-natural");
+    });
+
+    const headerCells = theadRowEl.querySelectorAll("th");
+    if (headerCells.length < 2) return; // no hay una 2da columna con la cual compartir espacio
+
+    const wrapperWidth = wrapperEl.clientWidth;
+    const col1Width = headerCells[0].getBoundingClientRect().width;
+
+    // Solo se limita si la columna inmovilizada ya ocupa, ella sola, todo
+    // (o más) del ancho visible de la tabla.
+    if (col1Width < wrapperWidth) return;
+
+    const col2Width = headerCells[1].getBoundingClientRect().width;
+    // Fragmento mínimo visible de la 3ra columna (si existe); si no hay
+    // 3ra columna, no hace falta reservarle espacio.
+    const col3FragmentWidth = headerCells[2]
+      ? Math.min(headerCells[2].getBoundingClientRect().width, 60)
+      : 0;
+
+    const minStickyWidth = 80; // piso para que la columna no quede inusable
+    let maxAllowed = wrapperWidth - col2Width - col3FragmentWidth;
+    if (maxAllowed < minStickyWidth) maxAllowed = minStickyWidth;
+
+    stickyCells.forEach(el => {
+      el.style.maxWidth = maxAllowed + "px";
+      el.style.whiteSpace = "nowrap";
+      el.style.overflow = "hidden";
+      el.style.textOverflow = "ellipsis";
+      // El texto completo queda disponible al pasar el mouse.
+      if (!el.getAttribute("title")) {
+        el.setAttribute("title", el.textContent);
+      }
+    });
+  }
+
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(adjustStickyColumnWidth, 150);
+  });
 
   async function syncSheet() {
     statusEl.textContent = "Sincronizando...";
@@ -291,47 +396,63 @@
       const json = JSON.parse(text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1));
       const rows = json.table.rows;
       const cols = json.table.cols;
+      const totalCols = cols.length;
 
-      // Encabezados dinámicos, en el orden en que figuran en la planilla.
-      // Si una columna no tiene encabezado, se le pone un nombre genérico.
-      const allHeaders = cols.map((c, i) => (c.label && c.label.trim()) || `Columna ${i + 1}`);
+      // Encabezados SIN recortar espacios: si la celda de encabezado tiene
+      // 1 espacio (" "), cuenta como "tiene un carácter" y la columna se
+      // muestra tal cual (con ese espacio). Si no tiene NINGÚN carácter,
+      // la columna entera queda excluida de la tabla (no se genera un
+      // nombre genérico para reemplazarla).
+      const rawHeaders = cols.map(c => (c.label !== undefined && c.label !== null) ? String(c.label) : "");
 
-      // Arma la lista de registros (filas con al menos un dato en la
-      // primera columna) manteniendo el orden y las columnas originales
-      // de la planilla, celda por celda.
-      const allDataRows = rows
-        .map(r => {
-          // La primera columna decide si el registro existe: si no tiene
-          // NINGÚN carácter se descarta. Si tiene al menos un carácter
-          // (aunque sea un espacio en blanco " "), el registro se toma.
-          const firstColRaw = cellValueRaw(r, 0);
-          if (firstColRaw.length === 0) return null;
+      // Filas: se arma primero el valor crudo (sin trim) de TODAS las
+      // columnas de cada fila, para poder decidir con el mismo criterio
+      // "sin caracteres = vacío" tanto la existencia del registro (columna
+      // 1) como, más abajo, si una columna tiene datos en algún lado.
+      const rawRows = rows.map(r => {
+        const rowValues = [];
+        for (let i = 0; i < totalCols; i++) {
+          rowValues.push(cellValueRaw(r, i));
+        }
+        return rowValues;
+      });
 
-          // El resto de las columnas se toma tal cual viene (recortando
-          // espacios), respetando la posición original de cada una.
-          const restValues = allHeaders.slice(1).map((_, i) => cellValue(r, i + 1));
+      // Un registro (fila) se descarta por completo si la 1ra columna de
+      // la planilla (posición 0, exista o no su encabezado) no tiene NINGÚN
+      // carácter. Si tiene al menos un carácter -aunque sea un espacio en
+      // blanco " "- el registro se toma y se muestra igual que cualquier
+      // otro.
+      const keptRawRows = rawRows.filter(values => values[0].length > 0);
 
-          return [firstColRaw, ...restValues];
-        })
-        .filter(values => values !== null); // descarta solo las filas sin primera columna
+      // Para mostrar, el resto de las columnas (todas menos la 1ra de la
+      // planilla) se recortan de espacios, igual que antes.
+      const keptRows = keptRawRows.map(values =>
+        values.map((v, i) => (i === 0 ? v : v.trim()))
+      );
 
-      // La última columna a mostrar es la última que tenga datos en ALGUNA
-      // fila (no la última que exista en la planilla). Así, si la planilla
-      // trae columnas vacías al final (por celdas en blanco o fórmulas sin
-      // usar), no se muestran como columnas vacías en la tabla.
-      let lastColWithData = -1;
-      allDataRows.forEach(values => {
-        for (let i = values.length - 1; i > lastColWithData; i--) {
-          if (values[i] !== "") {
-            lastColWithData = i;
+      // Columnas a considerar para mostrarse: solo aquellas cuyo encabezado
+      // tiene al menos 1 carácter (aunque sea un espacio).
+      let columnIndexes = rawHeaders
+        .map((h, i) => i)
+        .filter(i => rawHeaders[i].length > 0);
+
+      // Dentro de esas columnas, se recorta el final: la última columna que
+      // se muestra es la última que tenga algún dato en ALGUNA fila. Así,
+      // si la planilla trae columnas con encabezado pero sin datos al
+      // final, no quedan como columnas vacías en la tabla.
+      let lastPosWithData = -1;
+      keptRows.forEach(values => {
+        for (let pos = columnIndexes.length - 1; pos > lastPosWithData; pos--) {
+          if (values[columnIndexes[pos]] !== "") {
+            lastPosWithData = pos;
             break;
           }
         }
       });
-      const visibleColCount = lastColWithData + 1;
+      columnIndexes = columnIndexes.slice(0, lastPosWithData + 1);
 
-      currentHeaders = allHeaders.slice(0, visibleColCount);
-      currentDataRows = allDataRows.map(values => values.slice(0, visibleColCount));
+      currentHeaders = columnIndexes.map(i => rawHeaders[i]);
+      currentDataRows = keptRows.map(values => columnIndexes.map(i => values[i]));
 
       countEl.textContent = `Actualizados: ${currentDataRows.length} Registros`;
 
