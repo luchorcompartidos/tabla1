@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LRWebCatalog Dinámico</title>
+<title>Tablas "Dinámicas"</title>
 <style>
   body {
     font-family: -apple-system, Segoe UI, Roboto, sans-serif;
@@ -55,6 +55,20 @@
   }
 
   /* --- Vista de tabla --- */
+  #sheet-sync-hidden-legend {
+    margin-bottom: 8px;
+    font-size: 12px;
+    color: #666;
+  }
+  #sheet-sync-hidden-legend a {
+    color: #1a73e8;
+    text-decoration: none;
+    margin-right: 12px;
+    cursor: pointer;
+  }
+  #sheet-sync-hidden-legend a:hover {
+    text-decoration: underline;
+  }
   #sheet-sync-table-wrapper {
     overflow-x: auto;
     border: 1px solid #e0e0e0;
@@ -74,6 +88,16 @@
     white-space: nowrap;
     position: sticky;
     top: 0;
+    cursor: pointer;
+    user-select: none;
+  }
+  #sheet-sync-table thead th:hover {
+    background: #2c452c;
+  }
+  #sheet-sync-table thead th::after {
+    content: " ⏷";
+    font-size: 10px;
+    opacity: 0.6;
   }
   #sheet-sync-table tbody td {
     padding: 8px 12px;
@@ -99,13 +123,14 @@
 <body>
 
 <div id="sheet-sync-container">
-  <h1>LR WEB CATALOG Genérico</h1>
+  <h1>Tabla: </h1>
   <div class="sheet-sync-header">
     <span>Última sincronización: <span id="sheet-sync-time">—</span></span>
     <button id="sheet-sync-refresh">Actualizar ahora</button>
   </div>
   <div id="sheet-sync-count"></div>
   <div id="sheet-sync-status"></div>
+  <div id="sheet-sync-hidden-legend"></div>
   <div id="sheet-sync-table-wrapper">
     <table id="sheet-sync-table">
       <thead>
@@ -140,6 +165,15 @@
   const countEl = document.getElementById("sheet-sync-count");
   const theadRowEl = document.getElementById("sheet-sync-table-head");
   const tbodyEl = document.getElementById("sheet-sync-table-body");
+  const legendEl = document.getElementById("sheet-sync-hidden-legend");
+
+  // Estado en memoria (se conserva entre sincronizaciones automáticas,
+  // pero se recalcula si desaparece del todo la planilla). Se guarda por
+  // NOMBRE de columna, no por posición, para que no se desarme si la
+  // planilla cambia el orden de las columnas.
+  let currentHeaders = [];
+  let currentDataRows = [];
+  const hiddenColumns = new Set();
 
   function escapeHtml(str) {
     return String(str)
@@ -192,6 +226,62 @@
     return escapeHtml(value);
   }
 
+  // Dibuja la tabla (encabezado + filas) a partir de currentHeaders y
+  // currentDataRows, respetando qué columnas están ocultas en este momento.
+  // No vuelve a pedir datos a la planilla: solo redibuja lo que ya está
+  // en memoria, así que ocultar/mostrar columnas es instantáneo.
+  function renderTable() {
+    const visibleIndexes = currentHeaders
+      .map((_, i) => i)
+      .filter(i => !hiddenColumns.has(currentHeaders[i]));
+
+    // Encabezado: cada <th> es clickeable y oculta su columna.
+    theadRowEl.innerHTML = visibleIndexes
+      .map(i => `<th data-col-index="${i}" title="Click para ocultar esta columna">${escapeHtml(currentHeaders[i])}</th>`)
+      .join("");
+
+    theadRowEl.querySelectorAll("th").forEach(th => {
+      th.addEventListener("click", () => {
+        const idx = Number(th.getAttribute("data-col-index"));
+        hiddenColumns.add(currentHeaders[idx]);
+        renderTable();
+      });
+    });
+
+    // Leyenda de columnas ocultas, tipo hipervínculo: "Mostrar NombreColumna".
+    if (hiddenColumns.size > 0) {
+      legendEl.innerHTML = Array.from(hiddenColumns)
+        .map(name => `<a data-col-name="${escapeHtml(name)}">Mostrar ${escapeHtml(name)}</a>`)
+        .join("");
+
+      legendEl.querySelectorAll("a").forEach(a => {
+        a.addEventListener("click", () => {
+          const name = a.getAttribute("data-col-name");
+          hiddenColumns.delete(name);
+          renderTable();
+        });
+      });
+    } else {
+      legendEl.innerHTML = "";
+    }
+
+    // Cuerpo de la tabla: solo se listan las columnas visibles, en el
+    // mismo orden que el encabezado.
+    tbodyEl.innerHTML = currentDataRows
+      .map(values => {
+        const cellsHtml = visibleIndexes
+          .map(i => `<td>${formatValue(values[i])}</td>`)
+          .join("");
+        return `<tr>${cellsHtml}</tr>`;
+      })
+      .join("");
+
+    if (!tbodyEl.innerHTML) {
+      const colspan = visibleIndexes.length || 1;
+      tbodyEl.innerHTML = `<tr><td colspan="${colspan}" style="color:#999;">No se encontraron registros.</td></tr>`;
+    }
+  }
+
   async function syncSheet() {
     statusEl.textContent = "Sincronizando...";
     try {
@@ -204,17 +294,12 @@
 
       // Encabezados dinámicos, en el orden en que figuran en la planilla.
       // Si una columna no tiene encabezado, se le pone un nombre genérico.
-      const headers = cols.map((c, i) => (c.label && c.label.trim()) || `Columna ${i + 1}`);
-
-      // Pinta la fila de encabezado de la tabla (destacada por CSS).
-      theadRowEl.innerHTML = headers
-        .map(h => `<th>${escapeHtml(h)}</th>`)
-        .join("");
+      const allHeaders = cols.map((c, i) => (c.label && c.label.trim()) || `Columna ${i + 1}`);
 
       // Arma la lista de registros (filas con al menos un dato en la
       // primera columna) manteniendo el orden y las columnas originales
       // de la planilla, celda por celda.
-      const dataRows = rows
+      const allDataRows = rows
         .map(r => {
           // La primera columna decide si el registro existe: si no tiene
           // NINGÚN carácter se descarta. Si tiene al menos un carácter
@@ -224,27 +309,33 @@
 
           // El resto de las columnas se toma tal cual viene (recortando
           // espacios), respetando la posición original de cada una.
-          const restValues = headers.slice(1).map((_, i) => cellValue(r, i + 1));
+          const restValues = allHeaders.slice(1).map((_, i) => cellValue(r, i + 1));
 
           return [firstColRaw, ...restValues];
         })
         .filter(values => values !== null); // descarta solo las filas sin primera columna
 
-      countEl.textContent = `Actualizados: ${dataRows.length} Registros`;
+      // La última columna a mostrar es la última que tenga datos en ALGUNA
+      // fila (no la última que exista en la planilla). Así, si la planilla
+      // trae columnas vacías al final (por celdas en blanco o fórmulas sin
+      // usar), no se muestran como columnas vacías en la tabla.
+      let lastColWithData = -1;
+      allDataRows.forEach(values => {
+        for (let i = values.length - 1; i > lastColWithData; i--) {
+          if (values[i] !== "") {
+            lastColWithData = i;
+            break;
+          }
+        }
+      });
+      const visibleColCount = lastColWithData + 1;
 
-      tbodyEl.innerHTML = dataRows
-        .map(values => {
-          const cellsHtml = values
-            .map(v => `<td>${formatValue(v)}</td>`)
-            .join("");
-          return `<tr>${cellsHtml}</tr>`;
-        })
-        .join("");
+      currentHeaders = allHeaders.slice(0, visibleColCount);
+      currentDataRows = allDataRows.map(values => values.slice(0, visibleColCount));
 
-      if (!tbodyEl.innerHTML) {
-        const colspan = headers.length || 1;
-        tbodyEl.innerHTML = `<tr><td colspan="${colspan}" style="color:#999;">No se encontraron registros.</td></tr>`;
-      }
+      countEl.textContent = `Actualizados: ${currentDataRows.length} Registros`;
+
+      renderTable();
 
       statusEl.textContent = "";
       timeEl.textContent = new Date().toLocaleTimeString();
