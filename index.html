@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LRWebCatalog Dinámico</title>
+<style>
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #fafafa;
+    margin: 0;
+    padding: 30px 16px;
+  }
+  #sheet-sync-container {
+    max-width: 700px;
+    margin: 0 auto;
+    background: #fff;
+    border: 1px solid #e5e5e5;
+    border-radius: 10px;
+    padding: 20px 24px;
+  }
+  #sheet-sync-container h1 {
+    font-size: 18px;
+    margin: 0 0 16px 0;
+  }
+  .sheet-sync-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+  }
+  .sheet-sync-header span {
+    font-size: 13px;
+    color: #666;
+  }
+  #sheet-sync-refresh {
+    font-size: 12px;
+    padding: 4px 10px;
+    border: 1px solid #ccc;
+    background: #f7f7f7;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  #sheet-sync-refresh:hover { background: #eee; }
+  #sheet-sync-count {
+    font-size: 13px;
+    color: #666;
+    margin-bottom: 8px;
+  }
+  #sheet-sync-status {
+    font-size: 13px;
+    color: #999;
+    margin-bottom: 8px;
+    min-height: 16px;
+  }
+  #sheet-sync-list .record {
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #ddd;
+  }
+  #sheet-sync-list .record:last-child {
+    border-bottom: none;
+  }
+  #sheet-sync-list .record .record-title {
+    color: #1a2b1a;
+    font-weight: 600;
+    font-size: 15px;
+    display: block;
+  }
+  #sheet-sync-list .record .record-title a {
+    color: #1a73e8;
+    text-decoration: none;
+  }
+  #sheet-sync-list .record .record-title a:hover { text-decoration: underline; }
+  #sheet-sync-list .record .extra-field {
+    display: block;
+    margin-top: 4px;
+    font-size: 13px;
+    color: #444;
+  }
+  #sheet-sync-list .record .extra-field a {
+    font-weight: normal;
+    font-size: 13px;
+    color: #1a73e8;
+    text-decoration: none;
+  }
+  #sheet-sync-list .record .extra-field a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+
+<div id="sheet-sync-container">
+  <h1>LR WEB CATALOG Genérico</h1>
+  <div class="sheet-sync-header">
+    <span>Última sincronización: <span id="sheet-sync-time">—</span></span>
+    <button id="sheet-sync-refresh">Actualizar ahora</button>
+  </div>
+  <div id="sheet-sync-count"></div>
+  <div id="sheet-sync-status"></div>
+  <div id="sheet-sync-list"></div>
+</div>
+
+<script>
+(function () {
+  // --- Configuración ---
+  // A diferencia de la versión anterior, esta app NO busca columnas por nombre.
+  // Toma todas las columnas que existan en la planilla, en el orden en que
+  // aparezcan, y decide cómo mostrar cada valor según su propio contenido
+  // (por ejemplo, si "parece" una URL o no). Si agregás, quitás o reordenás
+  // columnas en la planilla, la página se adapta sola sin tocar el código.
+  const SHEET_ID = "1ZyWPJhsR2ZQrPdE6d49ITedRHwm8cOeP-qbnUnd24Yw";
+  const GID = "0";
+  const REFRESH_MS = 86400000; // vuelve a sincronizar cada 24 horas
+  const URL_REGEX = /^https?:\/\//i;
+
+  // "headers=1" le indica explícitamente a Google que la fila 1 es el
+  // encabezado. Sin este parámetro, si la planilla no lo detecta sola,
+  // los encabezados quedan vacíos y la fila 1 se cuela como si fuera
+  // el primer registro de datos.
+  const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${GID}&headers=1`;
+
+  const statusEl = document.getElementById("sheet-sync-status");
+  const timeEl = document.getElementById("sheet-sync-time");
+  const listEl = document.getElementById("sheet-sync-list");
+  const countEl = document.getElementById("sheet-sync-count");
+
+  function escapeHtml(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  // Devuelve el valor de una celda como texto, o "" si está vacía / no existe
+  function cellValue(row, colIndex) {
+    const cell = row.c[colIndex];
+    if (!cell || cell.v === null || cell.v === undefined) return "";
+    const str = String(cell.v).trim();
+    return str;
+  }
+
+  // Igual que cellValue, pero SIN recortar espacios. Se usa solo para la
+  // primera columna, porque ahí un espacio en blanco (" ") debe contar
+  // como "tiene un carácter" y no como celda vacía.
+  function cellValueRaw(row, colIndex) {
+    const cell = row.c[colIndex];
+    if (!cell || cell.v === null || cell.v === undefined) return "";
+    return String(cell.v);
+  }
+
+  function isUrl(value) {
+    return URL_REGEX.test(value);
+  }
+
+  // A partir de una URL, arma un texto de enlace legible sin depender del
+  // nombre de la columna: usa el dominio (sin "www."), que suele bastar
+  // para identificar de qué servicio se trata (spotify, youtube, etc).
+  function linkLabelFromUrl(value) {
+    try {
+      const host = new URL(value).hostname.replace(/^www\./, "");
+      return host;
+    } catch (e) {
+      return "Abrir enlace";
+    }
+  }
+
+  function formatValue(value) {
+    if (isUrl(value)) {
+      const safeUrl = escapeHtml(value);
+      const label = escapeHtml(linkLabelFromUrl(value));
+      return `<a href="${safeUrl}" target="_blank" rel="noopener">${label}</a>`;
+    }
+    return escapeHtml(value);
+  }
+
+  async function syncSheet() {
+    statusEl.textContent = "Sincronizando...";
+    try {
+      const res = await fetch(url);
+      const text = await res.text();
+      // La respuesta viene envuelta como: google.visualization.Query.setResponse({...});
+      const json = JSON.parse(text.substring(text.indexOf("{"), text.lastIndexOf("}") + 1));
+      const rows = json.table.rows;
+      const cols = json.table.cols;
+
+      // Encabezados dinámicos, en el orden en que figuran en la planilla.
+      // Si una columna no tiene encabezado, se le pone un nombre genérico.
+      const headers = cols.map((c, i) => (c.label && c.label.trim()) || `Columna ${i + 1}`);
+
+      // Arma primero la lista de registros (filas con al menos un dato) para
+      // poder contarlos antes de convertirlos en HTML.
+      const recordFields = rows
+        .map(r => {
+          // La primera columna decide si el registro existe: si no tiene
+          // NINGÚN carácter se descarta. Si tiene al menos un carácter
+          // (aunque sea un espacio en blanco " "), el registro se toma y
+          // se muestra igual que cualquier otro (por eso acá NO se usa
+          // cellValue, que recorta espacios, sino cellValueRaw).
+          const firstColRaw = cellValueRaw(r, 0);
+          if (firstColRaw.length === 0) return null;
+
+          // El resto de las columnas sigue funcionando como antes:
+          // se descartan las que no tengan dato.
+          const restFields = headers
+            .slice(1)
+            .map((header, i) => ({ header, value: cellValue(r, i + 1) }))
+            .filter(f => f.value !== "");
+
+          return [{ header: headers[0], value: firstColRaw }, ...restFields];
+        })
+        .filter(fields => fields !== null); // descarta solo las filas sin primera columna
+
+      countEl.textContent = `Actualizados: ${recordFields.length} Registros`;
+
+      listEl.innerHTML = recordFields
+        .map(fields => {
+          // La primera columna con dato de la fila se usa como título del
+          // registro (posición, no nombre). El resto se lista debajo.
+          const [titleField, ...restFields] = fields;
+
+          const titleHtml = isUrl(titleField.value)
+            ? `<a href="${escapeHtml(titleField.value)}" target="_blank" rel="noopener">${escapeHtml(titleField.value)}</a>`
+            : escapeHtml(titleField.value);
+
+          const restHtml = restFields
+            .map(f => `<span class="extra-field"><strong>${escapeHtml(f.header)}:</strong> ${formatValue(f.value)}</span>`)
+            .join("");
+
+          return `
+            <div class="record">
+              <span class="record-title">${titleHtml}</span>
+              ${restHtml}
+            </div>`;
+        })
+        .join("");
+
+      if (!listEl.innerHTML) {
+        listEl.innerHTML = '<p style="color:#999;font-size:14px;">No se encontraron registros.</p>';
+      }
+
+      statusEl.textContent = "";
+      timeEl.textContent = new Date().toLocaleTimeString();
+    } catch (err) {
+      statusEl.textContent = "No se pudo sincronizar. Verificá que la hoja sea pública ('cualquiera con el enlace').";
+      console.error(err);
+    }
+  }
+
+  document.getElementById("sheet-sync-refresh").addEventListener("click", syncSheet);
+  syncSheet();
+  setInterval(syncSheet, REFRESH_MS);
+})();
+</script>
+
+</body>
+</html>
