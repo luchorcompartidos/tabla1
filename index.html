@@ -11,6 +11,20 @@
     margin: 0;
     padding: 30px 16px;
   }
+  #sheet-sync-source {
+    max-width: 900px;
+    margin: 0 auto 12px;
+    font-size: 12px;
+    color: #555;
+    word-break: break-all;
+  }
+  #sheet-sync-source a {
+    color: #1a73e8;
+    text-decoration: none;
+  }
+  #sheet-sync-source a:hover {
+    text-decoration: underline;
+  }
   #sheet-sync-container {
     max-width: 900px;
     margin: 0 auto;
@@ -232,6 +246,11 @@
   .col-menu .menu-clear-filter:hover {
     text-decoration: underline;
   }
+  .col-menu .menu-clear-filter:disabled {
+    color: #aaa;
+    cursor: default;
+    text-decoration: none;
+  }
   .col-menu .menu-filter-list {
     max-height: 190px;
     overflow-y: auto;
@@ -253,6 +272,8 @@
 </style>
 </head>
 <body>
+
+<div id="sheet-sync-source"></div>
 
 <div id="sheet-sync-container">
   <h1>LR WEB CATALOG Genérico</h1>
@@ -295,6 +316,10 @@
   // el primer registro de datos.
   const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&gid=${GID}&headers=1`;
 
+  // Link "humano" a la planilla (para abrirla directamente en Google
+  // Sheets), distinto de la URL técnica de sincronización de arriba.
+  const sheetEditUrl = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit#gid=${GID}`;
+
   const statusEl = document.getElementById("sheet-sync-status");
   const timeEl = document.getElementById("sheet-sync-time");
   const countEl = document.getElementById("sheet-sync-count");
@@ -304,6 +329,10 @@
   const sortLegendEl = document.getElementById("sheet-sync-sort-legend");
   const wrapperEl = document.getElementById("sheet-sync-table-wrapper");
   const menuEl = document.getElementById("sheet-sync-col-menu");
+  const sourceLinkEl = document.getElementById("sheet-sync-source");
+
+  // Muestra el link completo a la planilla de origen, arriba del contenedor.
+  sourceLinkEl.innerHTML = `Planilla de origen: <a href="${sheetEditUrl}" target="_blank" rel="noopener">${sheetEditUrl}</a>`;
 
   // --- Estado en memoria ---
   // currentHeaders / currentDataRows ya vienen filtrados (sin las columnas
@@ -316,12 +345,17 @@
   //                   incluidos) hace que un valor nuevo que aparezca en
   //                   una sincronización futura se vea por defecto.
   //   sortCriteria  : [{ name, dir }] en orden de prioridad (anidado).
+  //   filterHistory : { nombreColumna: [estadoAnterior, ...] } pila de
+  //                   estados previos de columnFilters[nombreColumna]
+  //                   (cada elemento es un Set clonado, o null si en ese
+  //                   momento no había filtro), para poder "Deshacer".
   // Todo se guarda por NOMBRE de columna, no por posición, para no
   // desarmarse si la planilla cambia el orden de las columnas.
   let currentHeaders = [];
   let currentDataRows = [];
   const hiddenColumns = new Set();
   const columnFilters = {};
+  const filterHistory = {};
   let sortCriteria = [];
   let currentMenuColumn = null;
 
@@ -408,7 +442,34 @@
     return rows;
   }
 
+  function getUniqueValuesForColumn(colName) {
+    const colPos = currentHeaders.indexOf(colName);
+    return Array.from(new Set(currentDataRows.map(r => r[colPos]))).sort(compareValues);
+  }
+
+  // Guarda, ANTES de aplicar un cambio, el estado actual del filtro de una
+  // columna en su pila de historial, para poder "Deshacer" ese cambio
+  // puntual más adelante. null significa "en ese momento no había filtro".
+  function pushFilterHistory(colName) {
+    if (!filterHistory[colName]) filterHistory[colName] = [];
+    const snapshot = columnFilters[colName] ? new Set(columnFilters[colName]) : null;
+    filterHistory[colName].push(snapshot);
+    if (filterHistory[colName].length > 50) filterHistory[colName].shift();
+  }
+
+  function undoFilter(colName) {
+    const hist = filterHistory[colName];
+    if (!hist || hist.length === 0) return;
+    const prev = hist.pop();
+    if (prev === null) {
+      delete columnFilters[colName];
+    } else {
+      columnFilters[colName] = prev;
+    }
+  }
+
   function toggleColumnFilterValue(colName, value, checked) {
+    pushFilterHistory(colName);
     if (!columnFilters[colName]) columnFilters[colName] = new Set();
     if (checked) {
       columnFilters[colName].delete(value);
@@ -418,7 +479,13 @@
     if (columnFilters[colName].size === 0) delete columnFilters[colName];
   }
 
+  function deselectAllColumnValues(colName) {
+    pushFilterHistory(colName);
+    columnFilters[colName] = new Set(getUniqueValuesForColumn(colName));
+  }
+
   function clearColumnFilter(colName) {
+    pushFilterHistory(colName);
     delete columnFilters[colName];
   }
 
@@ -439,8 +506,7 @@
   // --- Menú de columna (ordenar / filtrar / ocultar) -------------------
 
   function buildMenuHTML(colName) {
-    const colPos = currentHeaders.indexOf(colName);
-    const uniqueValues = Array.from(new Set(currentDataRows.map(r => r[colPos]))).sort(compareValues);
+    const uniqueValues = getUniqueValuesForColumn(colName);
     const excluded = columnFilters[colName] || new Set();
     const sortIdx = sortCriteria.findIndex(c => c.name === colName);
     const sortDir = sortIdx !== -1 ? sortCriteria[sortIdx].dir : null;
@@ -459,6 +525,8 @@
       ? `<div class="menu-active-note">Filtro activo: ${uniqueValues.length - excluded.size} de ${uniqueValues.length} valores seleccionados</div>`
       : "";
 
+    const canUndo = filterHistory[colName] && filterHistory[colName].length > 0;
+
     return `
       <div class="menu-section-title">Ordenar</div>
       <button type="button" class="menu-item" data-sort-dir="asc">${ascLabel}</button>
@@ -466,7 +534,9 @@
       <hr>
       <div class="menu-section-title">Filtrar valores</div>
       ${activeNote}
-      <button type="button" class="menu-clear-filter" data-action="clear-filter">Limpiar selección</button>
+      <button type="button" class="menu-clear-filter" data-action="deselect-all">Deseleccionar todos</button>
+      <button type="button" class="menu-clear-filter" data-action="clear-filter">Limpiar Filtro</button>
+      <button type="button" class="menu-clear-filter" data-action="undo-filter" ${canUndo ? "" : "disabled"}>Deshacer</button>
       <div class="menu-filter-list">${checklistHtml || '<div style="color:#999;">Sin valores</div>'}</div>
       <hr>
       <button type="button" class="menu-item" data-action="hide-col">Ocultar columna</button>
@@ -513,9 +583,23 @@
       renderTable();
       return;
     }
+    const deselectAllBtn = e.target.closest('[data-action="deselect-all"]');
+    if (deselectAllBtn) {
+      deselectAllColumnValues(currentMenuColumn);
+      renderTable();
+      refreshMenuInPlace();
+      return;
+    }
     const clearBtn = e.target.closest('[data-action="clear-filter"]');
     if (clearBtn) {
       clearColumnFilter(currentMenuColumn);
+      renderTable();
+      refreshMenuInPlace();
+      return;
+    }
+    const undoBtn = e.target.closest('[data-action="undo-filter"]');
+    if (undoBtn) {
+      undoFilter(currentMenuColumn);
       renderTable();
       refreshMenuInPlace();
       return;
@@ -753,9 +837,13 @@
       currentDataRows = keptRows.map(values => columnIndexes.map(i => values[i]));
 
       // Limpieza de estado interactivo: si una columna dejó de existir
-      // (cambió la planilla), se descartan sus filtros/orden/ocultamiento.
+      // (cambió la planilla), se descartan sus filtros/orden/historial/
+      // ocultamiento.
       Object.keys(columnFilters).forEach(name => {
         if (!currentHeaders.includes(name)) delete columnFilters[name];
+      });
+      Object.keys(filterHistory).forEach(name => {
+        if (!currentHeaders.includes(name)) delete filterHistory[name];
       });
       sortCriteria = sortCriteria.filter(c => currentHeaders.includes(c.name));
       Array.from(hiddenColumns).forEach(name => {
